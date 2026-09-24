@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-ftml = "1.41.0"
+ftml = { git = "https://github.com/scpwiki/ftml", rev = "00b25dc1bbe4db602e3b88becf3445c39d686175" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
