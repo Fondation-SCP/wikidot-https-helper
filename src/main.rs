@@ -5,7 +5,9 @@ use rusqlite::Connection;
 
 #[derive(Parser)]
 struct Cli {
+    /// The path to the SQLite database to use.
     db: PathBuf,
+    /// The Wikidot site handle (e.g. `scp-wiki`)
     site: String,
 }
 
