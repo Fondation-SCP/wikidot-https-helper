@@ -90,7 +90,7 @@ fn main() {
 
     let regex = Regex::new(r#"http://([^/\s"'<>\]|]+)"#).expect("Failed to build the regex");
 
-    let hosts: HashSet<String> = pages
+    let hosts: HashMap<String, HashSet<String>> = pages
         .par_iter_mut()
         .progress_with(progress_bar)
         .map(|page| {
@@ -108,7 +108,7 @@ fn main() {
                 ));
                 let hosts: HashSet<String> = ciborium::from_reader(serialized_hosts.as_slice())
                     .expect("Failed to deserialize a host list");
-                return hosts;
+                return (page.slug.clone(), hosts);
             }
 
             parallel_bar.println(format!(
@@ -133,18 +133,34 @@ fn main() {
                     hosts: serialized_hosts,
                 })
                 .expect("The caching thread is gone");
-            hosts
+            (page.slug.clone(), hosts)
         })
-        .reduce(HashSet::new, |mut a, mut b| {
+        .fold(
+            HashMap::new,
+            |mut pages_containing: HashMap<String, HashSet<String>>, (slug, hosts)| {
+                for host in hosts {
+                    pages_containing
+                        .entry(host)
+                        .or_default()
+                        .insert(slug.clone());
+                }
+                pages_containing
+            },
+        )
+        .reduce(HashMap::new, |mut a, mut b| {
             // always merge the smaller set into the larger one, in order to rehash fewer elements
             if a.len() < b.len() {
                 std::mem::swap(&mut a, &mut b);
             }
-            a.extend(b);
+            for (host, slugs) in b {
+                a.entry(host).or_default().extend(slugs.iter().cloned());
+            }
             a
         });
 
-    println!("{} hosts generated", hosts.len());
+    for (host, sources) in hosts {
+        println!("`{}` from {:#?}", host, sources);
+    }
 }
 
 struct Cacheable {
