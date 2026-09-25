@@ -1,8 +1,8 @@
 use indicatif::ParallelProgressIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
-use rusqlite::params;
 use rusqlite::OpenFlags;
+use rusqlite::params;
 use std::collections::HashMap;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
@@ -89,7 +89,10 @@ fn main() {
             });
             map
         }
-        Err(_) => HashMap::new(),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg == "no such table: cache" => {
+            HashMap::new()
+        }
+        Err(_) => panic!("Failed to query the cache database"),
     };
     let cache_queue = spawn_cache_thread(cache_db);
 
@@ -115,7 +118,9 @@ fn main() {
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, warnings)) = cache.get(&page.url) && *cached_hash == hash {
+            if let Some((cached_hash, warnings)) = cache.get(&page.url)
+                && *cached_hash == hash
+            {
                 return warnings.len();
             }
 
