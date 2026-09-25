@@ -174,7 +174,7 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     std::thread::spawn(move || {
         db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, hosts BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
-        let interval = Duration::from_secs(1);
+        let interval = Duration::from_millis(100);
         let mut next_run = Instant::now();
 
         loop {
