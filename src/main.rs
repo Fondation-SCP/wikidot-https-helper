@@ -1,4 +1,3 @@
-use ftml::prelude::ParseError;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
 use rayon::iter::IntoParallelRefMutIterator;
@@ -8,18 +7,13 @@ use rusqlite::params;
 use std::collections::HashMap;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 use std::time::Instant;
-use std::{borrow::Cow, path::PathBuf};
 
 use clap::Parser;
-use ftml::{
-    data::{PageInfo, ScoreValue},
-    layout::Layout,
-    prelude::{WikitextMode, WikitextSettings},
-};
 use rusqlite::Connection;
 
 #[derive(Parser)]
@@ -37,8 +31,6 @@ struct Page {
     url: String,
     slug: String,
     source: String,
-    title: String,
-    category: String,
 }
 
 fn main() {
@@ -57,8 +49,6 @@ fn main() {
                 url: row.get("url")?,
                 slug: row.get("slug")?,
                 source: row.get("source")?,
-                title: row.get("title")?,
-                category: row.get("category")?,
             })
         })
         .expect("Failed to query the database")
@@ -66,22 +56,17 @@ fn main() {
         .collect::<Vec<_>>()
     };
 
-    let parse_settings = WikitextSettings::from_mode(WikitextMode::Page, Layout::Wikidot);
-
     let npages = pages.len() as u64;
 
     let cache_db =
         Connection::open(args.cache_db).expect("Failed to open a connection to the cache database");
-    let cache = match cache_db.prepare("SELECT url, hash, warnings FROM cache") {
+    let cache = match cache_db.prepare("SELECT url, hash, hosts FROM cache") {
         Ok(mut stmt) => {
             let mut map = HashMap::new();
             stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>("url")?,
-                    (
-                        row.get::<_, i64>("hash")?,
-                        row.get::<_, Vec<u8>>("warnings")?,
-                    ),
+                    (row.get::<_, i64>("hash")?, row.get::<_, Vec<u8>>("hosts")?),
                 ))
             })
             .expect("Failed to query the cache database")
@@ -101,29 +86,15 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
-    let nwarnings: usize = pages
+    let nhosts: usize = pages
         .par_iter_mut()
         .progress_with(progress_bar)
         .map(|page| {
-            let page_info = PageInfo {
-                page: Cow::Borrowed(&page.slug),
-                category: match &*page.category {
-                    "_default" => None, // according to docs: https://docs.rs/ftml/1.41.0/ftml/data/struct.PageInfo.html#structfield.category
-                    category => Some(Cow::Borrowed(category)),
-                },
-                site: Cow::Borrowed(&args.site),
-                title: Cow::Borrowed(&page.title),
-                alt_title: None, // not worth the hassle to try to fetch it
-                score: ScoreValue::Integer(0), // same
-                tags: Vec::new(), // same
-                language: Cow::Borrowed("en"), // same
-            };
-
             let mut hasher = DefaultHasher::new();
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, serialized_warnings)) = cache.get(&page.url)
+            if let Some((cached_hash, serialized_hosts)) = cache.get(&page.url)
                 && *cached_hash == hash
             {
                 parallel_bar.println(format!(
@@ -131,54 +102,47 @@ fn main() {
                     &page.slug,
                     console::style("- cache hit").dim()
                 ));
-                let warnings: Vec<ParseError> =
-                    ciborium::from_reader(serialized_warnings.as_slice())
-                        .expect("Failed to deserialize a warning list");
-                return warnings.len();
+                let hosts: Vec<String> = ciborium::from_reader(serialized_hosts.as_slice())
+                    .expect("Failed to deserialize a host list");
+                return hosts.len();
             }
 
             parallel_bar.println(format!(
                 "{} {}",
                 &page.slug,
-                console::style("- parsing").dim()
+                console::style("- searching").dim()
             ));
-            ftml::preprocess(&mut page.source);
-            let tokens = ftml::tokenize(&page.source);
-            let (tree, warnings) = ftml::parse(&tokens, &page_info, &parse_settings).into();
 
-            let mut serialized_warnings = Vec::new();
-            ciborium::into_writer(&warnings, &mut serialized_warnings)
+            let hosts: Vec<String> = todo!("find http:// hosts in the source");
+
+            let mut serialized_hosts = Vec::new();
+            ciborium::into_writer(&hosts, &mut serialized_hosts)
                 .expect("Failed to serialize a warning list");
-            let mut serialized_tree = Vec::new();
-            ciborium::into_writer(&tree, &mut serialized_tree)
-                .expect("Failed to serialize a syntax tree");
 
             cache_queue
                 .send(Cacheable {
                     url: page.url.clone(),
                     hash,
-                    warnings: serialized_warnings,
-                    blob: serialized_tree,
+                    hosts: serialized_hosts,
                 })
                 .expect("The caching thread is gone");
-            warnings.len()
+            hosts.len()
         })
         .sum();
 
-    println!("{} warnings generated", nwarnings);
+    println!("{} hosts generated", nhosts);
 }
 
 struct Cacheable {
     url: String,
     hash: i64, // u64 does not implement rusqlite::types::ToSql
-    warnings: Vec<u8>,
-    blob: Vec<u8>,
+    hosts: Vec<u8>,
 }
 
 fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, warnings BLOB NOT NULL, syntax_tree BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
+        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, hosts BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
         let interval = Duration::from_secs(1);
         let mut next_run = Instant::now();
@@ -188,14 +152,8 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for Cacheable {
-                    url,
-                    hash,
-                    warnings,
-                    blob,
-                } in rx.try_iter()
-                {
-                    transaction.execute("INSERT INTO cache(url, hash, warnings, syntax_tree) VALUES(?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, warnings=?, syntax_tree=?", params![url, hash, warnings, blob, hash, warnings, blob]).expect("Failed to cache a row");
+                for Cacheable { url, hash, hosts } in rx.try_iter() {
+                    transaction.execute("INSERT INTO cache(url, hash, hosts) VALUES(?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, hosts=?", params![url, hash, hosts,  hash, hosts]).expect("Failed to cache a row");
                 }
                 transaction
                     .commit()
