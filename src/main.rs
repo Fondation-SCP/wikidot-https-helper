@@ -1,7 +1,10 @@
 use indicatif::ParallelProgressIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
+use rusqlite::params;
 use rusqlite::OpenFlags;
+use std::hash::DefaultHasher;
+use std::hash::Hasher;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -28,6 +31,7 @@ struct Cli {
 }
 
 struct Page {
+    url: String,
     slug: String,
     source: String,
     title: String,
@@ -47,6 +51,7 @@ fn main() {
         let pattern = format!("http://{}.wikidot.com/%", args.site);
         stmt.query_map([pattern], |row| {
             Ok(Page {
+                url: row.get("url")?,
                 slug: row.get("slug")?,
                 source: row.get("source")?,
                 title: row.get("title")?,
@@ -82,11 +87,21 @@ fn main() {
                 language: Cow::Borrowed("en"), // same
             };
 
+            let mut hasher = DefaultHasher::new();
+            hasher.write(page.source.as_bytes());
+            let hash = hasher.finish() as i64;
+
+            todo!("check cache for hash before reparsing");
+
             ftml::preprocess(&mut page.source);
             let tokens = ftml::tokenize(&page.source);
             let (tree, warnings) = ftml::parse(&tokens, &page_info, &parse_settings).into();
             cache_queue
-                .send(todo!("serialize the syntax tree using postcard"))
+                .send(Cacheable {
+                    url: page.url.clone(),
+                    hash,
+                    blob: todo!("serialize tree using postcard"),
+                })
                 .expect("The caching thread is gone");
             warnings.len()
         })
@@ -95,7 +110,13 @@ fn main() {
     println!("{} warnings generated", nwarnings);
 }
 
-fn spawn_cache_thread(cache_db_path: PathBuf) -> Sender<Vec<u8>> {
+struct Cacheable {
+    url: String,
+    hash: i64, // u64 does not implement rusqlite::types::ToSql
+    blob: Vec<u8>,
+}
+
+fn spawn_cache_thread(cache_db_path: PathBuf) -> Sender<Cacheable> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut db = Connection::open(cache_db_path)
@@ -110,9 +131,12 @@ fn spawn_cache_thread(cache_db_path: PathBuf) -> Sender<Vec<u8>> {
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for blob in rx.try_iter() {
-                    todo!("cache blob using transaction");
+                for Cacheable { url, hash, blob } in rx.try_iter() {
+                    transaction.execute("INSERT INTO cache(url, hash, syntax_tree) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, syntax_tree=?",params![url,hash, blob, hash, blob]).expect("Failed to cache a row");
                 }
+                transaction
+                    .commit()
+                    .expect("Failed to commit a cache transaction");
             }
 
             next_run = start_time + interval;
