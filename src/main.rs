@@ -127,12 +127,20 @@ fn main() {
             ftml::preprocess(&mut page.source);
             let tokens = ftml::tokenize(&page.source);
             let (tree, warnings) = ftml::parse(&tokens, &page_info, &parse_settings).into();
+
+            let mut serialized_warnings = Vec::new();
+            ciborium::into_writer(&warnings, &mut serialized_warnings)
+                .expect("Failed to serialize a warning list");
+            let mut serialized_tree = Vec::new();
+            ciborium::into_writer(&tree, &mut serialized_tree)
+                .expect("Failed to serialize a syntax tree");
+
             cache_queue
                 .send(Cacheable {
                     url: page.url.clone(),
                     hash,
-                    warnings: todo!("serialize warning list using postcard"),
-                    blob: todo!("serialize tree using postcard"),
+                    warnings: serialized_warnings,
+                    blob: serialized_tree,
                 })
                 .expect("The caching thread is gone");
             warnings.len()
