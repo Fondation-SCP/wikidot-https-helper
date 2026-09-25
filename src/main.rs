@@ -1,5 +1,6 @@
 use ftml::prelude::ParseError;
 use indicatif::ParallelProgressIterator;
+use indicatif::ProgressBar;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rusqlite::OpenFlags;
@@ -97,9 +98,12 @@ fn main() {
     };
     let cache_queue = spawn_cache_thread(cache_db);
 
+    let progress_bar = ProgressBar::new(npages);
+    let parallel_bar = progress_bar.clone();
+
     let nwarnings: usize = pages
         .par_iter_mut()
-        .progress_count(npages)
+        .progress_with(progress_bar)
         .map(|page| {
             let page_info = PageInfo {
                 page: Cow::Borrowed(&page.slug),
@@ -122,12 +126,22 @@ fn main() {
             if let Some((cached_hash, serialized_warnings)) = cache.get(&page.url)
                 && *cached_hash == hash
             {
+                parallel_bar.println(format!(
+                    "{} {}",
+                    &page.slug,
+                    console::style("- cache hit").dim()
+                ));
                 let warnings: Vec<ParseError> =
                     ciborium::from_reader(serialized_warnings.as_slice())
                         .expect("Failed to deserialize a warning list");
                 return warnings.len();
             }
 
+            parallel_bar.println(format!(
+                "{} {}",
+                &page.slug,
+                console::style("- parsing").dim()
+            ));
             ftml::preprocess(&mut page.source);
             let tokens = ftml::tokenize(&page.source);
             let (tree, warnings) = ftml::parse(&tokens, &page_info, &parse_settings).into();
