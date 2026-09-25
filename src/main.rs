@@ -88,7 +88,7 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
-    let regex = Regex::new(r#"http://([^/\s"'<>\]|]+)"#).expect("Failed to build the regex");
+    let regex = Regex::new(r#"http://([^/\s"'<>\]|█*]+)"#).expect("Failed to build the regex");
 
     let hosts: HashMap<String, HashSet<String>> = pages
         .par_iter_mut()
@@ -119,7 +119,7 @@ fn main() {
 
             let hosts: HashSet<String> = regex
                 .captures_iter(&page.source)
-                .map(|captures| captures[1].to_owned())
+                .map(|captures| captures[1].trim_end_matches(".").to_owned())
                 .collect();
 
             let mut serialized_hosts = Vec::new();
