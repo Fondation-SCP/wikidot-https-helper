@@ -2,6 +2,7 @@ use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
+use regex::Regex;
 use rusqlite::OpenFlags;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -87,6 +88,8 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
+    let regex = Regex::new(r#"http://([^/\s"'<>\]|]+)"#).expect("Failed to build the regex");
+
     let hosts: HashSet<String> = pages
         .par_iter_mut()
         .progress_with(progress_bar)
@@ -114,7 +117,10 @@ fn main() {
                 console::style("- searching").dim()
             ));
 
-            let hosts: HashSet<String> = todo!("find http:// hosts in the source");
+            let hosts: HashSet<String> = regex
+                .captures_iter(&page.source)
+                .map(|captures| captures[1].to_owned())
+                .collect();
 
             let mut serialized_hosts = Vec::new();
             ciborium::into_writer(&hosts, &mut serialized_hosts)
