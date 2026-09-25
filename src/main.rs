@@ -24,7 +24,7 @@ struct Cli {
     db: PathBuf,
     /// The Wikidot site handle (e.g. `scp-wiki`)
     site: String,
-    /// The path to the SQLite database that contains the cached FTML syntax trees.
+    /// The path to the SQLite database that contains the cached host sets.
     #[arg(long, default_value = "wikidot-https-helper-cache.sqlite")]
     cache_db: PathBuf,
 }
