@@ -3,6 +3,7 @@ use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rusqlite::params;
 use rusqlite::OpenFlags;
+use std::collections::HashMap;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
 use std::sync::mpsc;
@@ -47,7 +48,7 @@ fn main() {
     let mut pages = {
         let mut stmt = db
             .prepare("SELECT * FROM pages WHERE url LIKE ?")
-            .expect("Failed to prepare SQL `SELECT` statement");
+            .expect("Failed to prepare SQL `SELECT` statement over the source database");
         let pattern = format!("http://{}.wikidot.com/%", args.site);
         stmt.query_map([pattern], |row| {
             Ok(Page {
@@ -67,7 +68,24 @@ fn main() {
 
     let npages = pages.len() as u64;
 
-    let cache_queue = spawn_cache_thread(args.cache_db);
+    let cache_db =
+        Connection::open(args.cache_db).expect("Failed to open a connection to the cache database");
+    let cache = match cache_db.prepare("SELECT url, hash FROM cache") {
+        Ok(mut stmt) => {
+            let mut map = HashMap::new();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>("url")?, row.get::<_, String>("hash")?))
+            })
+            .expect("Failed to query the cache database")
+            .map(|maybe_index| maybe_index.expect("Failed to iterate through a cache row"))
+            .for_each(|(url, hash)| {
+                map.insert(url, hash);
+            });
+            map
+        }
+        Err(_) => HashMap::new(),
+    };
+    let cache_queue = spawn_cache_thread(cache_db);
 
     let nwarnings: usize = pages
         .par_iter_mut()
@@ -116,11 +134,9 @@ struct Cacheable {
     blob: Vec<u8>,
 }
 
-fn spawn_cache_thread(cache_db_path: PathBuf) -> Sender<Cacheable> {
+fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut db = Connection::open(cache_db_path)
-            .expect("Failed to open a connection to the cache database");
         db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, syntax_tree BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
         let interval = Duration::from_secs(1);
