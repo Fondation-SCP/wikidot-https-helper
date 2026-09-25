@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 ftml = { git = "https://github.com/scpwiki/ftml", rev = "00b25dc1bbe4db602e3b88becf3445c39d686175" }
 indicatif = { version = "0.18.6", features = ["rayon"] }
