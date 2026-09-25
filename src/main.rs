@@ -1,3 +1,4 @@
+use ftml::prelude::ParseError;
 use indicatif::ParallelProgressIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
@@ -118,9 +119,12 @@ fn main() {
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, warnings)) = cache.get(&page.url)
+            if let Some((cached_hash, serialized_warnings)) = cache.get(&page.url)
                 && *cached_hash == hash
             {
+                let warnings: Vec<ParseError> =
+                    ciborium::from_reader(serialized_warnings.as_slice())
+                        .expect("Failed to deserialize a warning list");
                 return warnings.len();
             }
 
