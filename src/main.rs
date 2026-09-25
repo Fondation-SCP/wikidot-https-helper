@@ -70,16 +70,22 @@ fn main() {
 
     let cache_db =
         Connection::open(args.cache_db).expect("Failed to open a connection to the cache database");
-    let cache = match cache_db.prepare("SELECT url, hash FROM cache") {
+    let cache = match cache_db.prepare("SELECT url, hash, warnings FROM cache") {
         Ok(mut stmt) => {
             let mut map = HashMap::new();
             stmt.query_map([], |row| {
-                Ok((row.get::<_, String>("url")?, row.get::<_, String>("hash")?))
+                Ok((
+                    row.get::<_, String>("url")?,
+                    (
+                        row.get::<_, i64>("hash")?,
+                        row.get::<_, Vec<u8>>("warnings")?,
+                    ),
+                ))
             })
             .expect("Failed to query the cache database")
             .map(|maybe_index| maybe_index.expect("Failed to iterate through a cache row"))
-            .for_each(|(url, hash)| {
-                map.insert(url, hash);
+            .for_each(|(url, data)| {
+                map.insert(url, data);
             });
             map
         }
@@ -109,7 +115,9 @@ fn main() {
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            todo!("check cache for hash before reparsing");
+            if let Some((cached_hash, warnings)) = cache.get(&page.url) && *cached_hash == hash {
+                return warnings.len();
+            }
 
             ftml::preprocess(&mut page.source);
             let tokens = ftml::tokenize(&page.source);
