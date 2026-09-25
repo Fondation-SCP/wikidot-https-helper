@@ -93,7 +93,7 @@ fn main() {
         Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg == "no such table: cache" => {
             HashMap::new()
         }
-        Err(_) => panic!("Failed to query the cache database"),
+        Err(error) => panic!("Failed to query the cache database: {}", error),
     };
     let cache_queue = spawn_cache_thread(cache_db);
 
