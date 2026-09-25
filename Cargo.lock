@@ -559,7 +559,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "ftml"
 version = "1.42.1"
-source = "git+https://github.com/scpwiki/ftml?rev=00b25dc1bbe4db602e3b88becf3445c39d686175#00b25dc1bbe4db602e3b88becf3445c39d686175"
+source = "git+https://github.com/thief-sty/ftml?rev=9cdb1de4a8d3e0912ba56d5acd6b990360fc9ff2#9cdb1de4a8d3e0912ba56d5acd6b990360fc9ff2"
 dependencies = [
  "built",
  "cfg-if",
