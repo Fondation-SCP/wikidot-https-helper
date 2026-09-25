@@ -124,7 +124,7 @@ fn main() {
 
             let mut serialized_hosts = Vec::new();
             ciborium::into_writer(&hosts, &mut serialized_hosts)
-                .expect("Failed to serialize a warning list");
+                .expect("Failed to serialize a host list");
 
             cache_queue
                 .send(Cacheable {
@@ -167,7 +167,7 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
 
             if let Ok(transaction) = db.transaction() {
                 for Cacheable { url, hash, hosts } in rx.try_iter() {
-                    transaction.execute("INSERT INTO cache(url, hash, hosts) VALUES(?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, hosts=?", params![url, hash, hosts,  hash, hosts]).expect("Failed to cache a row");
+                    transaction.execute("INSERT INTO cache(url, hash, hosts) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, hosts=?", params![url, hash, hosts, hash, hosts]).expect("Failed to cache a row");
                 }
                 transaction
                     .commit()
