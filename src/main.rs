@@ -5,6 +5,7 @@ use rayon::iter::ParallelIterator;
 use rusqlite::OpenFlags;
 use rusqlite::params;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
 use std::path::PathBuf;
@@ -86,7 +87,7 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
-    let nhosts: usize = pages
+    let hosts: HashSet<String> = pages
         .par_iter_mut()
         .progress_with(progress_bar)
         .map(|page| {
@@ -102,9 +103,9 @@ fn main() {
                     &page.slug,
                     console::style("- cache hit").dim()
                 ));
-                let hosts: Vec<String> = ciborium::from_reader(serialized_hosts.as_slice())
+                let hosts: HashSet<String> = ciborium::from_reader(serialized_hosts.as_slice())
                     .expect("Failed to deserialize a host list");
-                return hosts.len();
+                return hosts;
             }
 
             parallel_bar.println(format!(
@@ -113,7 +114,7 @@ fn main() {
                 console::style("- searching").dim()
             ));
 
-            let hosts: Vec<String> = todo!("find http:// hosts in the source");
+            let hosts: HashSet<String> = todo!("find http:// hosts in the source");
 
             let mut serialized_hosts = Vec::new();
             ciborium::into_writer(&hosts, &mut serialized_hosts)
@@ -126,11 +127,18 @@ fn main() {
                     hosts: serialized_hosts,
                 })
                 .expect("The caching thread is gone");
-            hosts.len()
+            hosts
         })
-        .sum();
+        .reduce(HashSet::new, |mut a, mut b| {
+            // always merge the smaller set into the larger one, in order to rehash fewer elements
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            a.extend(b);
+            a
+        });
 
-    println!("{} hosts generated", nhosts);
+    println!("{} hosts generated", hosts.len());
 }
 
 struct Cacheable {
