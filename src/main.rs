@@ -118,6 +118,7 @@ fn main() {
                 .send(Cacheable {
                     url: page.url.clone(),
                     hash,
+                    warnings: todo!("serialize warning list using postcard"),
                     blob: todo!("serialize tree using postcard"),
                 })
                 .expect("The caching thread is gone");
@@ -131,6 +132,7 @@ fn main() {
 struct Cacheable {
     url: String,
     hash: i64, // u64 does not implement rusqlite::types::ToSql
+    warnings: Vec<u8>,
     blob: Vec<u8>,
 }
 
@@ -147,8 +149,14 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for Cacheable { url, hash, blob } in rx.try_iter() {
-                    transaction.execute("INSERT INTO cache(url, hash, syntax_tree) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, syntax_tree=?",params![url,hash, blob, hash, blob]).expect("Failed to cache a row");
+                for Cacheable {
+                    url,
+                    hash,
+                    warnings,
+                    blob,
+                } in rx.try_iter()
+                {
+                    transaction.execute("INSERT INTO cache(url, hash, warnings, syntax_tree) VALUES(?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, warnings=?, syntax_tree=?", params![url, hash, warnings, blob, hash, warnings, blob]).expect("Failed to cache a row");
                 }
                 transaction
                     .commit()
