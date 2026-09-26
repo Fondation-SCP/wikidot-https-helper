@@ -160,16 +160,17 @@ fn main() {
         .fold(
             HashMap::new,
             |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
-                let hosts = matches.into_iter().map(|HostMatch { host, .. }| host);
+                let hosts = matches.iter().map(|HostMatch { host, .. }| host);
                 for host in hosts {
                     pages_containing
-                        .entry(host)
+                        .entry(host.clone())
                         .or_default()
                         .insert(PageAsMatchSet {
                             slug: slug.clone(),
                             matches: matches
-                                .into_iter()
+                                .iter()
                                 .map(|HostMatch { requested_path, .. }| requested_path)
+                                .cloned()
                                 .collect(),
                         });
                 }
