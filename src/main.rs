@@ -5,7 +5,6 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use regex::Regex;
-use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::blocking::Response;
 use reqwest::redirect::Policy;
@@ -81,26 +80,9 @@ fn main() {
             .par_iter()
             .progress_with(progress_bar)
             .for_each(
-                |(host, _)| match client.head(format!("https://{}", host)).send() {
-                    Ok(response) => handle_response(&client, host, response, &parallel_bar),
-                    Err(error) => {
-                        if error.is_dns() {
-                            parallel_bar.println(format!("{}: DNS error", host));
-                        } else if error.is_connect() {
-                            parallel_bar.println(format!(
-                                "{}: connection error{}",
-                                host,
-                                error
-                                    .source()
-                                    .map(|src| format!(" ({:?})", src))
-                                    .unwrap_or_default()
-                            ));
-                        } else if error.is_timeout() {
-                            parallel_bar.println(format!("{}: timeout", host));
-                        } else {
-                            parallel_bar.println(format!("{}: weird error ({:?})", host, error));
-                        }
-                    }
+                |(host, _)| match make_request(&client, &format!("https://{}", host)) {
+                    Ok(response) => handle_response(&client, host, &response, &parallel_bar, 0),
+                    Err(error) => parallel_bar.println(error),
                 },
             );
     });
@@ -114,44 +96,83 @@ fn main() {
     // - no response: broken
 }
 
-fn handle_response(client: &Client, host: &str, response: &Response, bar: &ProgressBar) {
+fn make_request(client: &Client, host: &str) -> Result<Response, String> {
+    client.head(host).send().map_err(|error| {
+        if error.is_dns() {
+            format!("{}: DNS error", host)
+        } else if error.is_connect() {
+            format!(
+                "{}: connection error{}",
+                host,
+                error
+                    .source()
+                    .map(|src| format!(" ({:?})", src))
+                    .unwrap_or_default()
+            )
+        } else if error.is_timeout() {
+            format!("{}: timeout", host)
+        } else {
+            format!("{}: weird error ({:?})", host, error)
+        }
+    })
+}
+
+fn handle_response(
+    client: &Client,
+    host: &str,
+    response: &Response,
+    bar: &ProgressBar,
+    redirection_depth: u8,
+) {
     let status = response.status();
     if !status.is_success() {
         match u16::from(status) {
             403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
-            301 | 302 | 307 | 308 => match response.headers().get("Location") {
-                Some(location) => match location.to_str() {
-                    Ok(location) => match handle_redir(client, location) {
-                        Ok(response) => handle_response(client, host, &response, bar),
-                        Err(error) => {
-                            bar.println(format!("{}: redirection error ({:#?})", host, error))
-                        }
-                    },
-                    Err(error) => {
-                        bar.println(format!(
+            301 | 302 | 307 | 308 => {
+                if redirection_depth < 10 {
+                    match response.headers().get("Location") {
+                        Some(location) => match location.to_str() {
+                            Ok(location) => {
+                                if location.starts_with("http:") {
+                                    bar.println(format!("{}: redirected to HTTP", host))
+                                } else {
+                                    match make_request(client, location) {
+                                        Ok(response) => handle_response(
+                                            client,
+                                            location,
+                                            &response,
+                                            bar,
+                                            redirection_depth + 1,
+                                        ),
+                                        Err(error) => bar.println(error),
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                bar.println(format!(
                             "{}: redirection code ({}) with an invalid Location header ({:#?})",
                             host,
                             u16::from(status),
                             error
                         ));
+                            }
+                        },
+                        None => {
+                            bar.println(format!(
+                                "{}: redirection code ({}) without a Location header",
+                                host,
+                                u16::from(status)
+                            ));
+                        }
                     }
-                },
-                None => {
-                    bar.println(format!(
-                        "{}: redirection code ({}) without a Location header",
-                        host,
-                        u16::from(status)
-                    ));
+                } else {
+                    bar.println(format!("{}: too many redirections", host))
                 }
-            },
+            }
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
             other => bar.println(format!("Weird response from {}: code {}", host, other)),
         }
     }
-}
-
-fn handle_redir(client: &Client, host: &str) -> Result<Response, std::convert::Infallible> {
-    todo!("handle redirection")
 }
 
 fn get_matches(
