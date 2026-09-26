@@ -5,6 +5,7 @@ use rayon::iter::ParallelIterator;
 use regex::Regex;
 use rusqlite::OpenFlags;
 use rusqlite::params;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::DefaultHasher;
@@ -33,6 +34,20 @@ struct Page {
     url: String,
     slug: String,
     source: String,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct HostMatch {
+    host: String,
+    requested_path: String,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone)]
+/// A page, viewed as a set of matches over a given host
+struct PageAsMatchSet {
+    slug: String,
+    /// The set of paths requested by the page that this `PageAsMatchSet` represents on the given host
+    matches: BTreeSet<String>,
 }
 
 fn main() {
@@ -88,9 +103,10 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
-    let regex = Regex::new(r#"http://([^/\s"'<>\]|█*]+)"#).expect("Failed to build the regex");
+    let regex = Regex::new(r#"http://([^/\s"'<>\]|█*]+)([^\s"'<>\]|█*]+)"#)
+        .expect("Failed to build the regex");
 
-    let hosts: HashMap<String, HashSet<String>> = pages
+    let hosts: HashMap<String, HashSet<PageAsMatchSet>> = pages
         .par_iter_mut()
         .progress_with(progress_bar)
         .map(|page| {
@@ -98,7 +114,7 @@ fn main() {
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, serialized_hosts)) = cache.get(&page.url)
+            if let Some((cached_hash, serialized_matches)) = cache.get(&page.url)
                 && *cached_hash == hash
             {
                 parallel_bar.println(format!(
@@ -106,9 +122,10 @@ fn main() {
                     &page.slug,
                     console::style("- cache hit").dim()
                 ));
-                let hosts: HashSet<String> = ciborium::from_reader(serialized_hosts.as_slice())
-                    .expect("Failed to deserialize a host list");
-                return (page.slug.clone(), hosts);
+                let matches: HashSet<HostMatch> =
+                    ciborium::from_reader(serialized_matches.as_slice())
+                        .expect("Failed to deserialize a match list");
+                return (page.slug.clone(), matches);
             }
 
             parallel_bar.println(format!(
@@ -117,32 +134,42 @@ fn main() {
                 console::style("- searching").dim()
             ));
 
-            let hosts: HashSet<String> = regex
+            let matches: HashSet<HostMatch> = regex
                 .captures_iter(&page.source)
-                .map(|captures| captures[1].trim_end_matches(".").to_owned())
+                .map(|captures| HostMatch {
+                    host: captures[1].trim_end_matches(".").to_owned(),
+                    requested_path: captures[2].to_owned(),
+                })
                 .collect();
 
-            let mut serialized_hosts = Vec::new();
-            ciborium::into_writer(&hosts, &mut serialized_hosts)
-                .expect("Failed to serialize a host list");
+            let mut serialized_matches = Vec::new();
+            ciborium::into_writer(&matches, &mut serialized_matches)
+                .expect("Failed to serialize a match list");
 
             cache_queue
                 .send(Cacheable {
                     url: page.url.clone(),
                     hash,
-                    hosts: serialized_hosts,
+                    matches: serialized_matches,
                 })
                 .expect("The caching thread is gone");
-            (page.slug.clone(), hosts)
+            (page.slug.clone(), matches)
         })
         .fold(
             HashMap::new,
-            |mut pages_containing: HashMap<String, HashSet<String>>, (slug, hosts)| {
+            |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
+                let hosts = matches.into_iter().map(|HostMatch { host, .. }| host);
                 for host in hosts {
                     pages_containing
                         .entry(host)
                         .or_default()
-                        .insert(slug.clone());
+                        .insert(PageAsMatchSet {
+                            slug: slug.clone(),
+                            matches: matches
+                                .into_iter()
+                                .map(|HostMatch { requested_path, .. }| requested_path)
+                                .collect(),
+                        });
                 }
                 pages_containing
             },
@@ -152,27 +179,31 @@ fn main() {
             if a.len() < b.len() {
                 std::mem::swap(&mut a, &mut b);
             }
-            for (host, slugs) in b {
-                a.entry(host).or_default().extend(slugs.iter().cloned());
+            for (host, pages) in b {
+                a.entry(host).or_default().extend(pages.iter().cloned());
             }
             a
         });
 
-    for (host, sources) in hosts {
-        println!("`{}` from {:#?}", host, sources);
-    }
+    // TODO:
+    // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
+    // - HEAD request to host, using https://
+    // - follow 301, 302, 307, 308 to https:// (any to http:// is broken)
+    // - on 403, 405 or 501: need GET (with acceptable UA)
+    // - on other 4xx: compare with http:// to be sure
+    // - no response: broken
 }
 
 struct Cacheable {
     url: String,
     hash: i64, // u64 does not implement rusqlite::types::ToSql
-    hosts: Vec<u8>,
+    matches: Vec<u8>,
 }
 
 fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, hosts BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
+        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, matches BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
         let interval = Duration::from_millis(100);
         let mut next_run = Instant::now();
@@ -182,8 +213,8 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for Cacheable { url, hash, hosts } in rx.try_iter() {
-                    transaction.execute("INSERT INTO cache(url, hash, hosts) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, hosts=?", params![url, hash, hosts, hash, hosts]).expect("Failed to cache a row");
+                for Cacheable { url, hash, matches } in rx.try_iter() {
+                    transaction.execute("INSERT INTO cache(url, hash, matches) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, hash, matches, hash, matches]).expect("Failed to cache a row");
                 }
                 transaction
                     .commit()
