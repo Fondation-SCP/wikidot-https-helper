@@ -33,8 +33,6 @@ enum Command {
     },
     Check,
     Find {
-        /// The Wikidot site handle (e.g. `scp-wiki`)
-        site: String,
         /// The host that is being looked for.
         host: String,
     },
@@ -76,13 +74,18 @@ fn main() {
 
             // TODO:
             // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
-            // - HEAD request to host, using https://
-            // - follow 301, 302, 307, 308 to https:// (any to http:// is broken)
-            // - on 403, 405 or 501: need GET (with acceptable UA)
-            // - on other 4xx: compare with http:// to be sure
-            // - no response: broken
         }
-        Command::Find { .. } => todo!("find pages that need the specified host"),
+        Command::Find { host } => {
+            let hosts = from_pages::get_cached_matches(&args.cache_db);
+            match hosts.get(&host) {
+                None => println!("No matches"),
+                Some(pages) => {
+                    for from_pages::PageAsMatchSet { slug, matches } in pages {
+                        println!("{}: {:#?}", slug, matches);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -184,6 +187,7 @@ fn handle_response(client: &Client, host: Host, response: &Response, bar: &Progr
                     }
                 }
             }
+            // TODO: on other 4xx: compare with http:// to be sure
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
             other => bar.println(format!("Weird response from {}: code {}", host, other)),
         }

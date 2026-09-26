@@ -34,9 +34,9 @@ struct HostMatch {
 #[derive(PartialEq, Eq, Hash, Clone)]
 /// A page, viewed as a set of matches over a given host
 pub struct PageAsMatchSet {
-    slug: String,
+    pub slug: String,
     /// The set of paths requested by the page that this `PageAsMatchSet` represents on the given host
-    matches: BTreeSet<String>,
+    pub matches: BTreeSet<String>,
 }
 
 pub fn get_matches(
