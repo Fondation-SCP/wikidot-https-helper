@@ -5,6 +5,8 @@ use rayon::iter::ParallelIterator;
 use regex::Regex;
 use rusqlite::OpenFlags;
 use rusqlite::params;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -36,7 +38,7 @@ struct Page {
     source: String,
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct HostMatch {
     host: String,
     requested_path: String,
