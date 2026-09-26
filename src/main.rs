@@ -105,7 +105,7 @@ fn main() {
     let progress_bar = ProgressBar::new(npages);
     let parallel_bar = progress_bar.clone();
 
-    let regex = Regex::new(r#"http://([^/\s"'<>\]|█*]+)([^\s"'<>\]|█*]+)"#)
+    let regex = Regex::new(r#"http://([^/\s"'<>\[\]@|█*,]+)([^\s"'<>\[\]@|█*,]*)"#)
         .expect("Failed to build the regex");
 
     let hosts: HashMap<String, HashSet<PageAsMatchSet>> = pages
@@ -139,8 +139,11 @@ fn main() {
             let matches: HashSet<HostMatch> = regex
                 .captures_iter(&page.source)
                 .map(|captures| HostMatch {
-                    host: captures[1].trim_end_matches(".").to_owned(),
-                    requested_path: captures[2].to_owned(),
+                    host: captures[1].to_owned(),
+                    requested_path: captures[2]
+                        .trim_end_matches(")")
+                        .trim_end_matches(");")
+                        .to_owned(),
                 })
                 .collect();
 
