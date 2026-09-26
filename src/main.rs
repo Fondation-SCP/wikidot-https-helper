@@ -55,14 +55,30 @@ struct PageAsMatchSet {
 fn main() {
     let args = Cli::parse();
 
-    let db = Connection::open_with_flags(args.db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let hosts = get_matches(&args.site, &args.db, &args.cache_db);
+
+    // TODO:
+    // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
+    // - HEAD request to host, using https://
+    // - follow 301, 302, 307, 308 to https:// (any to http:// is broken)
+    // - on 403, 405 or 501: need GET (with acceptable UA)
+    // - on other 4xx: compare with http:// to be sure
+    // - no response: broken
+}
+
+fn get_matches(
+    site: &String,
+    db: &PathBuf,
+    cache_db: &PathBuf,
+) -> HashMap<String, HashSet<PageAsMatchSet>> {
+    let db = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("Failed to open a connection to the database");
 
     let mut pages = {
         let mut stmt = db
             .prepare("SELECT * FROM pages WHERE url LIKE ?")
             .expect("Failed to prepare SQL `SELECT` statement over the source database");
-        let pattern = format!("http://{}.wikidot.com/%", args.site);
+        let pattern = format!("http://{}.wikidot.com/%", site);
         stmt.query_map([pattern], |row| {
             Ok(Page {
                 url: row.get("url")?,
@@ -78,7 +94,7 @@ fn main() {
     let npages = pages.len() as u64;
 
     let cache_db =
-        Connection::open(args.cache_db).expect("Failed to open a connection to the cache database");
+        Connection::open(cache_db).expect("Failed to open a connection to the cache database");
     let cache = match cache_db.prepare("SELECT url, hash, hosts FROM cache") {
         Ok(mut stmt) => {
             let mut map = HashMap::new();
@@ -108,7 +124,7 @@ fn main() {
     let regex = Regex::new(r#"http://([^/\s"'<>\[\]@|█*,]+)([^\s"'<>\[\]@|█*,]*)"#)
         .expect("Failed to build the regex");
 
-    let hosts: HashMap<String, HashSet<PageAsMatchSet>> = pages
+    pages
         .par_iter_mut()
         .progress_with(progress_bar)
         .map(|page| {
@@ -197,15 +213,7 @@ fn main() {
                 a.entry(host).or_default().extend(pages.iter().cloned());
             }
             a
-        });
-
-    // TODO:
-    // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
-    // - HEAD request to host, using https://
-    // - follow 301, 302, 307, 308 to https:// (any to http:// is broken)
-    // - on 403, 405 or 501: need GET (with acceptable UA)
-    // - on other 4xx: compare with http:// to be sure
-    // - no response: broken
+        })
 }
 
 struct Cacheable {
