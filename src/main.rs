@@ -1,8 +1,11 @@
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
+use rayon::ThreadPoolBuilder;
+use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use regex::Regex;
+use reqwest::redirect::Policy;
 use rusqlite::OpenFlags;
 use rusqlite::params;
 use serde::Deserialize;
@@ -10,6 +13,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::error::Error;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
 use std::path::PathBuf;
@@ -56,6 +60,65 @@ fn main() {
     let args = Cli::parse();
 
     let hosts = get_matches(&args.site, &args.db, &args.cache_db);
+
+    let client = reqwest::blocking::Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .expect("Failed to create the HTTP client");
+    let thread_pool = ThreadPoolBuilder::new()
+        .num_threads(64)
+        .build()
+        .expect("Failed to create the thread pool for HTTP requests");
+
+    let progress_bar = ProgressBar::new(hosts.len() as u64);
+    let parallel_bar = progress_bar.clone();
+
+    thread_pool.install(|| {
+        hosts
+            .par_iter()
+            .progress_with(progress_bar)
+            .for_each(
+                |(host, _)| match client.head(format!("https://{}", host)).send() {
+                    Ok(response) => {
+                        let status = response.status();
+                        if !status.is_success() {
+                            match u16::from(status) {
+                                403 | 405 | 501 => parallel_bar
+                                    .println(format!("{}: need GET with acceptable UA", host)),
+                                301 | 302 | 307 | 308 => {
+                                    parallel_bar.println(format!("{}: redirection", host))
+                                }
+                                other if status.is_client_error() => {
+                                    parallel_bar.println(format!("{}: code {}", host, other))
+                                }
+                                other => parallel_bar.println(format!(
+                                    "Weird response from {}: code {}",
+                                    host, other
+                                )),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if error.is_dns() {
+                            parallel_bar.println(format!("{}: DNS error", host));
+                        } else if error.is_connect() {
+                            parallel_bar.println(format!(
+                                "{}: connection error{}",
+                                host,
+                                error
+                                    .source()
+                                    .map(|src| format!(" ({:?})", src))
+                                    .unwrap_or_default()
+                            ));
+                        } else if error.is_timeout() {
+                            parallel_bar.println(format!("{}: timeout", host));
+                        } else {
+                            parallel_bar.println(format!("{}: weird error ({:?})", host, error));
+                        }
+                    }
+                },
+            );
+    });
 
     // TODO:
     // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
