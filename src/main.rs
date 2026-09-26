@@ -60,7 +60,7 @@ fn main() {
 
             thread_pool.install(|| {
                 hosts.par_iter().progress_with(progress_bar).for_each(
-                    |(host, _)| match make_request(&client, &format!("https://{}", host)) {
+                    |(host, _)| match make_request(&client, host) {
                         Ok(response) => handle_response(
                             &client,
                             Host::OriginalHost(host.to_owned()),
@@ -90,7 +90,13 @@ fn main() {
 }
 
 fn make_request(client: &Client, host: &str) -> Result<Response, String> {
-    client.head(host).send().map_err(|error| {
+    let url = if host.starts_with("https://") {
+        host
+    } else {
+        &format!("https://{}", host)
+    };
+
+    client.head(url).send().map_err(|error| {
         if error.is_dns() {
             format!("{}: DNS error", host)
         } else if error.is_connect() {
