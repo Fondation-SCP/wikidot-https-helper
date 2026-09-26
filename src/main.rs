@@ -95,13 +95,16 @@ fn get_matches(
 
     let cache_db =
         Connection::open(cache_db).expect("Failed to open a connection to the cache database");
-    let cache = match cache_db.prepare("SELECT url, hash, hosts FROM cache") {
+    let cache = match cache_db.prepare("SELECT url, hash, matches FROM cache") {
         Ok(mut stmt) => {
             let mut map = HashMap::new();
             stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>("url")?,
-                    (row.get::<_, i64>("hash")?, row.get::<_, Vec<u8>>("hosts")?),
+                    (
+                        row.get::<_, i64>("hash")?,
+                        row.get::<_, Vec<u8>>("matches")?,
+                    ),
                 ))
             })
             .expect("Failed to query the cache database")
