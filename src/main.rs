@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error;
+use std::fmt::Display;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
 use std::path::PathBuf;
@@ -81,7 +82,12 @@ fn main() {
             .progress_with(progress_bar)
             .for_each(
                 |(host, _)| match make_request(&client, &format!("https://{}", host)) {
-                    Ok(response) => handle_response(&client, host, &response, &parallel_bar, 0),
+                    Ok(response) => handle_response(
+                        &client,
+                        Host::OriginalHost(host.to_owned()),
+                        &response,
+                        &parallel_bar,
+                    ),
                     Err(error) => parallel_bar.println(error),
                 },
             );
@@ -117,19 +123,50 @@ fn make_request(client: &Client, host: &str) -> Result<Response, String> {
     })
 }
 
-fn handle_response(
-    client: &Client,
-    host: &str,
-    response: &Response,
-    bar: &ProgressBar,
-    redirection_depth: u8,
-) {
+enum Host {
+    OriginalHost(String),
+    Redirected { depth: u8, original_host: String },
+}
+
+impl Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OriginalHost(host) => f.write_str(host),
+            Self::Redirected { original_host, .. } => f.write_str(original_host),
+        }
+    }
+}
+
+impl Host {
+    fn recur(self) -> Self {
+        match self {
+            Self::OriginalHost(host) => Self::Redirected {
+                depth: 1,
+                original_host: host,
+            },
+            Self::Redirected {
+                depth,
+                original_host,
+                ..
+            } => Self::Redirected {
+                depth: depth + 1,
+                original_host,
+            },
+        }
+    }
+}
+
+fn handle_response(client: &Client, host: Host, response: &Response, bar: &ProgressBar) {
     let status = response.status();
     if !status.is_success() {
         match u16::from(status) {
             403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
             301 | 302 | 307 | 308 => {
-                if redirection_depth < 10 {
+                if let Host::Redirected { depth, .. } = host
+                    && depth > 10
+                {
+                    bar.println(format!("{}: too many redirections", host))
+                } else {
                     match response.headers().get("Location") {
                         Some(location) => match location.to_str() {
                             Ok(location) => {
@@ -137,13 +174,9 @@ fn handle_response(
                                     bar.println(format!("{}: redirected to HTTP", host))
                                 } else {
                                     match make_request(client, location) {
-                                        Ok(response) => handle_response(
-                                            client,
-                                            location,
-                                            &response,
-                                            bar,
-                                            redirection_depth + 1,
-                                        ),
+                                        Ok(response) => {
+                                            handle_response(client, host.recur(), &response, bar)
+                                        }
                                         Err(error) => bar.println(error),
                                     }
                                 }
@@ -165,8 +198,6 @@ fn handle_response(
                             ));
                         }
                     }
-                } else {
-                    bar.println(format!("{}: too many redirections", host))
                 }
             }
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
