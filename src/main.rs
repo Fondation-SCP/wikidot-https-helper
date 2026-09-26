@@ -5,8 +5,10 @@ use indicatif::ProgressBar;
 use rayon::ThreadPoolBuilder;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
+use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::blocking::Response;
+use reqwest::header::USER_AGENT;
 use reqwest::redirect::Policy;
 use std::error::Error;
 use std::fmt::Display;
@@ -64,6 +66,7 @@ fn main() {
                         Ok(response) => handle_response(
                             &client,
                             Host::OriginalHost(host.to_owned()),
+                            &Method::HEAD,
                             &response,
                             &parallel_bar,
                         ),
@@ -96,24 +99,29 @@ fn make_request(client: &Client, host: &str) -> Result<Response, String> {
         &format!("https://{}", host)
     };
 
-    client.head(url).send().map_err(|error| {
-        if error.is_dns() {
-            format!("{}: DNS error", host)
-        } else if error.is_connect() {
-            format!(
-                "{}: connection error{}",
-                host,
-                error
-                    .source()
-                    .map(|src| format!(" ({:?})", src))
-                    .unwrap_or_default()
-            )
-        } else if error.is_timeout() {
-            format!("{}: timeout", host)
-        } else {
-            format!("{}: weird error ({:?})", host, error)
-        }
-    })
+    client
+        .head(url)
+        .send()
+        .map_err(|error| request_error_msg(host, error))
+}
+
+fn request_error_msg(host: &str, error: reqwest::Error) -> String {
+    if error.is_dns() {
+        format!("{}: DNS error", host)
+    } else if error.is_connect() {
+        format!(
+            "{}: connection error{}",
+            host,
+            error
+                .source()
+                .map(|src| format!(" ({:?})", src))
+                .unwrap_or_default()
+        )
+    } else if error.is_timeout() {
+        format!("{}: timeout", host)
+    } else {
+        format!("{}: weird error ({:?})", host, error)
+    }
 }
 
 enum Host {
@@ -149,11 +157,37 @@ impl Host {
     }
 }
 
-fn handle_response(client: &Client, host: Host, response: &Response, bar: &ProgressBar) {
+fn make_get_request(client: &Client, host: &Host) -> Result<Response, String> {
+    client
+        .get(format!("https://{}", host))
+        .header(
+            USER_AGENT,
+            "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0",
+        )
+        .send()
+        .map_err(|error| request_error_msg(&host.to_string(), error))
+}
+
+fn handle_response(
+    client: &Client,
+    host: Host,
+    method: &Method,
+    response: &Response,
+    bar: &ProgressBar,
+) {
     let status = response.status();
     if !status.is_success() {
         match u16::from(status) {
-            403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
+            403 | 405 | 501 => {
+                if method == Method::HEAD {
+                    match make_get_request(client, &host) {
+                        Ok(response) => handle_response(client, host, &Method::GET, &response, bar),
+                        Err(error) => bar.println(error),
+                    }
+                } else {
+                    bar.println(format!("{}: code {} even on GET", host, u16::from(status)))
+                }
+            }
             301 | 302 | 307 | 308 => {
                 if let Host::Redirected { depth, .. } = host
                     && depth > 10
@@ -167,9 +201,13 @@ fn handle_response(client: &Client, host: Host, response: &Response, bar: &Progr
                                     bar.println(format!("{}: redirected to HTTP", host))
                                 } else {
                                     match make_request(client, location) {
-                                        Ok(response) => {
-                                            handle_response(client, host.recur(), &response, bar)
-                                        }
+                                        Ok(response) => handle_response(
+                                            client,
+                                            host.recur(),
+                                            &Method::HEAD,
+                                            &response,
+                                            bar,
+                                        ),
                                         Err(error) => bar.println(error),
                                     }
                                 }
@@ -194,6 +232,7 @@ fn handle_response(client: &Client, host: Host, response: &Response, bar: &Progr
                 }
             }
             // TODO: on other 4xx: compare with http:// to be sure
+            // 429 should be surfaced, not much we can do about it
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
             other => bar.println(format!("Weird response from {}: code {}", host, other)),
         }
