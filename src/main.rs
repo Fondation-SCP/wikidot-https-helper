@@ -125,13 +125,13 @@ fn main() {
 
 fn work(hosts: &HashSet<String>, progress_bar: &ProgressBar, client: &Client) {
     hosts.par_iter().for_each(|host| {
-        match make_request(&client, host) {
+        match make_request(client, host) {
             Ok(response) => handle_response(
-                &client,
+                client,
                 Host::OriginalHost(host.to_owned()),
                 &Method::HEAD,
                 &response,
-                &progress_bar,
+                progress_bar,
             ),
             Err(error) => progress_bar.println(error),
         }
