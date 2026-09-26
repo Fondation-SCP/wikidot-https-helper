@@ -172,7 +172,15 @@ fn main() {
                             slug: slug.clone(),
                             matches: matches
                                 .iter()
-                                .map(|HostMatch { requested_path, .. }| requested_path)
+                                .filter_map(
+                                    |HostMatch {
+                                         requested_path,
+                                         host: matched_host,
+                                     }| match matched_host {
+                                        x if x == host => Some(requested_path),
+                                        _ => None,
+                                    },
+                                )
                                 .cloned()
                                 .collect(),
                         });
