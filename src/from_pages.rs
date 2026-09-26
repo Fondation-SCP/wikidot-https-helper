@@ -124,34 +124,9 @@ pub fn get_matches(
                 .expect("The caching thread is gone");
             (page.slug.clone(), matches)
         })
-        .fold(
-            HashMap::new,
-            |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
-                let hosts = matches.iter().map(|HostMatch { host, .. }| host);
-                for host in hosts {
-                    pages_containing
-                        .entry(host.clone())
-                        .or_default()
-                        .insert(PageAsMatchSet {
-                            slug: slug.clone(),
-                            matches: matches
-                                .iter()
-                                .filter_map(
-                                    |HostMatch {
-                                         requested_path,
-                                         host: matched_host,
-                                     }| match matched_host {
-                                        x if x == host => Some(requested_path),
-                                        _ => None,
-                                    },
-                                )
-                                .cloned()
-                                .collect(),
-                        });
-                }
-                pages_containing
-            },
-        )
+        .fold(HashMap::new, |pages_containing, (slug, matches)| {
+            group_by_host(pages_containing, (&slug, &matches))
+        })
         .reduce(HashMap::new, |mut a, mut b| {
             // always merge the smaller set into the larger one, in order to rehash fewer elements
             if a.len() < b.len() {
@@ -162,6 +137,35 @@ pub fn get_matches(
             }
             a
         })
+}
+
+fn group_by_host(
+    mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>,
+    (slug, matches): (&str, &HashSet<HostMatch>),
+) -> HashMap<String, HashSet<PageAsMatchSet>> {
+    let hosts = matches.iter().map(|HostMatch { host, .. }| host);
+    for host in hosts {
+        pages_containing
+            .entry(host.clone())
+            .or_default()
+            .insert(PageAsMatchSet {
+                slug: slug.to_owned(),
+                matches: matches
+                    .iter()
+                    .filter_map(
+                        |HostMatch {
+                             requested_path,
+                             host: matched_host,
+                         }| match matched_host {
+                            x if x == host => Some(requested_path),
+                            _ => None,
+                        },
+                    )
+                    .cloned()
+                    .collect(),
+            });
+    }
+    pages_containing
 }
 
 struct Cacheable {
@@ -206,34 +210,7 @@ pub fn get_cached_matches(cache_db: &PathBuf) -> HashMap<String, HashSet<PageAsM
             let slug = url.rsplit("/").next().expect("Failed to extract a slug");
             (slug, matches)
         })
-        .fold(
-            HashMap::new(),
-            |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
-                let hosts = matches.iter().map(|HostMatch { host, .. }| host);
-                for host in hosts {
-                    pages_containing
-                        .entry(host.clone())
-                        .or_default()
-                        .insert(PageAsMatchSet {
-                            slug: slug.to_owned(),
-                            matches: matches
-                                .iter()
-                                .filter_map(
-                                    |HostMatch {
-                                         requested_path,
-                                         host: matched_host,
-                                     }| match matched_host {
-                                        x if x == host => Some(requested_path),
-                                        _ => None,
-                                    },
-                                )
-                                .cloned()
-                                .collect(),
-                        });
-                }
-                pages_containing
-            },
-        )
+        .fold(HashMap::new(), group_by_host)
 }
 
 fn prepare_cache(cache_db: &PathBuf) -> (Connection, HashMap<String, (i64, HashSet<HostMatch>)>) {
