@@ -5,6 +5,8 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use regex::Regex;
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use rusqlite::OpenFlags;
 use rusqlite::params;
@@ -61,7 +63,7 @@ fn main() {
 
     let hosts = get_matches(&args.site, &args.db, &args.cache_db);
 
-    let client = reqwest::blocking::Client::builder()
+    let client = Client::builder()
         .redirect(Policy::none())
         .build()
         .expect("Failed to create the HTTP client");
@@ -79,25 +81,7 @@ fn main() {
             .progress_with(progress_bar)
             .for_each(
                 |(host, _)| match client.head(format!("https://{}", host)).send() {
-                    Ok(response) => {
-                        let status = response.status();
-                        if !status.is_success() {
-                            match u16::from(status) {
-                                403 | 405 | 501 => parallel_bar
-                                    .println(format!("{}: need GET with acceptable UA", host)),
-                                301 | 302 | 307 | 308 => {
-                                    parallel_bar.println(format!("{}: redirection", host))
-                                }
-                                other if status.is_client_error() => {
-                                    parallel_bar.println(format!("{}: code {}", host, other))
-                                }
-                                other => parallel_bar.println(format!(
-                                    "Weird response from {}: code {}",
-                                    host, other
-                                )),
-                            }
-                        }
-                    }
+                    Ok(response) => handle_status(&client, host, response.status(), &parallel_bar),
                     Err(error) => {
                         if error.is_dns() {
                             parallel_bar.println(format!("{}: DNS error", host));
@@ -127,6 +111,24 @@ fn main() {
     // - on 403, 405 or 501: need GET (with acceptable UA)
     // - on other 4xx: compare with http:// to be sure
     // - no response: broken
+}
+
+fn handle_status(client: &Client, host: &str, status: StatusCode, bar: &ProgressBar) {
+    if !status.is_success() {
+        match u16::from(status) {
+            403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
+            301 | 302 | 307 | 308 => match handle_redir(client, todo!("fetch redirection host")) {
+                Ok(status) => handle_status(client, host, status, bar),
+                Err(error) => bar.println(format!("{}: redirection error ({:#?})", host, error)),
+            },
+            other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
+            other => bar.println(format!("Weird response from {}: code {}", host, other)),
+        }
+    }
+}
+
+fn handle_redir(client: &Client, host: &str) -> Result<StatusCode, std::convert::Infallible> {
+    todo!("handle redirection")
 }
 
 fn get_matches(
