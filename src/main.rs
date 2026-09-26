@@ -1,7 +1,7 @@
 use clap::Parser;
 use clap::Subcommand;
-use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use rayon::ThreadPoolBuilder;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
@@ -60,21 +60,26 @@ fn main() {
             let hosts: HashSet<String> = from_pages::get_cached_matches(&args.cache_db)
                 .into_keys()
                 .collect();
-            let nhosts = hosts.len() as u64;
-            let (wikidot_hosts, hosts): (HashSet<String>, HashSet<String>) = hosts
-                .into_par_iter()
-                .progress_count(nhosts)
-                .partition(|host| {
+            let progress_bar = ProgressBar::new(hosts.len() as u64).with_style(
+                ProgressStyle::with_template(
+                    "Discriminating Wikidot hostnames {wide_bar} {pos}/{len}",
+                )
+                .expect("Failed to create the template for the DNS lookup progress bar"),
+            );
+            let (wikidot_hosts, hosts): (HashSet<String>, HashSet<String>) =
+                hosts.into_par_iter().partition(|host| {
                     if let Ok(addrs) = (host as &str, 443).to_socket_addrs() {
                         for addr in addrs {
                             if let SocketAddr::V4(socket) = addr
                                 && wikidot_addresses.contains(socket.ip())
                             {
+                                progress_bar.inc(1);
                                 return true;
                             }
                         }
                     }
 
+                    progress_bar.inc(1);
                     false
                 });
 
@@ -85,13 +90,17 @@ fn main() {
             let thread_pool = ThreadPoolBuilder::new()
                 .num_threads(64)
                 .build()
-                .expect("Failed to create the thread pool for HTTP requests");
+                .expect("Failed to create the thread pool for HTTPS requests");
             let wikidot_thread_pool = ThreadPoolBuilder::new()
                 .num_threads(4) // this is to avoid being rate-limited by Wikidot, since many hostnames actually lead there
                 .build()
-                .expect("Failed to create the thread pool for Wikidot HTTP requests");
+                .expect("Failed to create the thread pool for Wikidot HTTPS requests");
 
-            let progress_bar = ProgressBar::new((hosts.len() + wikidot_hosts.len()) as u64);
+            let progress_bar = ProgressBar::new((hosts.len() + wikidot_hosts.len()) as u64)
+                .with_style(
+                    ProgressStyle::with_template("Sending HTTPS requests {wide_bar} {pos}/{len}")
+                        .expect("Failed to create the template for the host check progress bar"),
+                );
             rayon::join(
                 || thread_pool.install(|| work(&hosts, &progress_bar, &client)),
                 || wikidot_thread_pool.install(|| work(&wikidot_hosts, &progress_bar, &client)),

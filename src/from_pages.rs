@@ -1,5 +1,5 @@
-use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use regex::Regex;
@@ -69,7 +69,10 @@ pub fn get_matches(
     let (cache_db, cache) = prepare_cache(cache_db);
     let cache_queue = spawn_cache_thread(cache_db);
 
-    let progress_bar = ProgressBar::new(npages);
+    let progress_bar = ProgressBar::new(npages).with_style(
+        ProgressStyle::with_template("Looking for hostnames in pages {wide_bar} {pos}/{len}")
+            .expect("Failed to create the template for the host search progress bar"),
+    );
     let parallel_bar = progress_bar.clone();
 
     let regex = Regex::new(r#"http://([^/\s"'<>\[\]@|█*,]+)([^\s"'<>\[\]@|█*,]*)"#)
@@ -77,7 +80,6 @@ pub fn get_matches(
 
     pages
         .par_iter_mut()
-        .progress_with(progress_bar)
         .map(|page| {
             let mut hasher = DefaultHasher::new();
             hasher.write(page.source.as_bytes());
@@ -91,6 +93,7 @@ pub fn get_matches(
                     &page.slug,
                     console::style("- cache hit").dim()
                 ));
+                parallel_bar.inc(1);
                 return (page.slug.clone(), matches.iter().cloned().collect());
             }
 
@@ -122,6 +125,7 @@ pub fn get_matches(
                     matches: serialized_matches,
                 })
                 .expect("The caching thread is gone");
+            parallel_bar.inc(1);
             (page.slug.clone(), matches)
         })
         .fold(HashMap::new, |pages_containing, (slug, matches)| {
