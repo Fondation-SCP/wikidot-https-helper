@@ -3,6 +3,7 @@ use clap::Subcommand;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
 use rayon::ThreadPoolBuilder;
+use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use reqwest::Method;
@@ -10,8 +11,12 @@ use reqwest::blocking::Client;
 use reqwest::blocking::Response;
 use reqwest::header::USER_AGENT;
 use reqwest::redirect::Policy;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 
 mod from_pages;
@@ -47,7 +52,32 @@ fn main() {
             from_pages::get_matches(&site, &db, &args.cache_db);
         }
         Command::Check => {
-            let hosts = from_pages::get_cached_matches(&args.cache_db);
+            let wikidot_addresses = [
+                Ipv4Addr::new(107, 20, 139, 170),
+                Ipv4Addr::new(107, 20, 139, 176),
+            ];
+
+            let hosts: HashSet<String> = from_pages::get_cached_matches(&args.cache_db)
+                .into_keys()
+                .collect();
+            let nhosts = hosts.len() as u64;
+            let (wikidot_hosts, hosts): (HashSet<String>, HashSet<String>) = hosts
+                .into_par_iter()
+                .progress_count(nhosts)
+                .partition(|host| {
+                    if let Ok(addrs) = (host as &str, 443).to_socket_addrs() {
+                        for addr in addrs {
+                            if let SocketAddr::V4(socket) = addr
+                                && wikidot_addresses.contains(socket.ip())
+                            {
+                                return true;
+                            }
+                        }
+                    }
+
+                    false
+                });
+
             let client = Client::builder()
                 .redirect(Policy::none())
                 .build()
@@ -56,24 +86,16 @@ fn main() {
                 .num_threads(64)
                 .build()
                 .expect("Failed to create the thread pool for HTTP requests");
+            let wikidot_thread_pool = ThreadPoolBuilder::new()
+                .num_threads(4) // this is to avoid being rate-limited by Wikidot, since many hostnames actually lead there
+                .build()
+                .expect("Failed to create the thread pool for Wikidot HTTP requests");
 
-            let progress_bar = ProgressBar::new(hosts.len() as u64);
-            let parallel_bar = progress_bar.clone();
-
-            thread_pool.install(|| {
-                hosts.par_iter().progress_with(progress_bar).for_each(
-                    |(host, _)| match make_request(&client, host) {
-                        Ok(response) => handle_response(
-                            &client,
-                            Host::OriginalHost(host.to_owned()),
-                            &Method::HEAD,
-                            &response,
-                            &parallel_bar,
-                        ),
-                        Err(error) => parallel_bar.println(error),
-                    },
-                );
-            });
+            let progress_bar = ProgressBar::new((hosts.len() + wikidot_hosts.len()) as u64);
+            rayon::join(
+                || thread_pool.install(|| work(&hosts, &progress_bar, &client)),
+                || wikidot_thread_pool.install(|| work(&wikidot_hosts, &progress_bar, &client)),
+            );
 
             // TODO:
             // - flag CSS deps (need GET 200 with correct MIME "Content-Type: text/css")
@@ -90,6 +112,22 @@ fn main() {
             }
         }
     }
+}
+
+fn work(hosts: &HashSet<String>, progress_bar: &ProgressBar, client: &Client) {
+    hosts.par_iter().for_each(|host| {
+        match make_request(&client, host) {
+            Ok(response) => handle_response(
+                &client,
+                Host::OriginalHost(host.to_owned()),
+                &Method::HEAD,
+                &response,
+                &progress_bar,
+            ),
+            Err(error) => progress_bar.println(error),
+        }
+        progress_bar.inc(1);
+    });
 }
 
 fn make_request(client: &Client, host: &str) -> Result<Response, String> {
