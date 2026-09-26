@@ -1,0 +1,233 @@
+use indicatif::ParallelProgressIterator;
+use indicatif::ProgressBar;
+use rayon::iter::IntoParallelRefMutIterator;
+use rayon::iter::ParallelIterator;
+use regex::Regex;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
+use rusqlite::params;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::hash::DefaultHasher;
+use std::hash::Hasher;
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+use std::time::Duration;
+use std::time::Instant;
+
+struct Page {
+    url: String,
+    slug: String,
+    source: String,
+}
+
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct HostMatch {
+    host: String,
+    requested_path: String,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone)]
+/// A page, viewed as a set of matches over a given host
+pub struct PageAsMatchSet {
+    slug: String,
+    /// The set of paths requested by the page that this `PageAsMatchSet` represents on the given host
+    matches: BTreeSet<String>,
+}
+
+pub fn get_matches(
+    site: &String,
+    db: &PathBuf,
+    cache_db: &PathBuf,
+) -> HashMap<String, HashSet<PageAsMatchSet>> {
+    let db = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("Failed to open a connection to the database");
+
+    let mut pages = {
+        let mut stmt = db
+            .prepare("SELECT * FROM pages WHERE url LIKE ?")
+            .expect("Failed to prepare SQL `SELECT` statement over the source database");
+        let pattern = format!("http://{}.wikidot.com/%", site);
+        stmt.query_map([pattern], |row| {
+            Ok(Page {
+                url: row.get("url")?,
+                slug: row.get("slug")?,
+                source: row.get("source")?,
+            })
+        })
+        .expect("Failed to query the database")
+        .map(|maybe_page| maybe_page.expect("Failed to iterate through a page"))
+        .collect::<Vec<_>>()
+    };
+
+    let npages = pages.len() as u64;
+
+    let cache_db =
+        Connection::open(cache_db).expect("Failed to open a connection to the cache database");
+    let cache = match cache_db.prepare("SELECT url, hash, matches FROM cache") {
+        Ok(mut stmt) => {
+            let mut map = HashMap::new();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("url")?,
+                    (
+                        row.get::<_, i64>("hash")?,
+                        row.get::<_, Vec<u8>>("matches")?,
+                    ),
+                ))
+            })
+            .expect("Failed to query the cache database")
+            .map(|maybe_index| maybe_index.expect("Failed to iterate through a cache row"))
+            .for_each(|(url, data)| {
+                map.insert(url, data);
+            });
+            map
+        }
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg == "no such table: cache" => {
+            HashMap::new()
+        }
+        Err(error) => panic!("Failed to query the cache database: {}", error),
+    };
+    let cache_queue = spawn_cache_thread(cache_db);
+
+    let progress_bar = ProgressBar::new(npages);
+    let parallel_bar = progress_bar.clone();
+
+    let regex = Regex::new(r#"http://([^/\s"'<>\[\]@|█*,]+)([^\s"'<>\[\]@|█*,]*)"#)
+        .expect("Failed to build the regex");
+
+    pages
+        .par_iter_mut()
+        .progress_with(progress_bar)
+        .map(|page| {
+            let mut hasher = DefaultHasher::new();
+            hasher.write(page.source.as_bytes());
+            let hash = hasher.finish() as i64;
+
+            if let Some((cached_hash, serialized_matches)) = cache.get(&page.url)
+                && *cached_hash == hash
+            {
+                parallel_bar.println(format!(
+                    "{} {}",
+                    &page.slug,
+                    console::style("- cache hit").dim()
+                ));
+                let matches: HashSet<HostMatch> =
+                    ciborium::from_reader(serialized_matches.as_slice())
+                        .expect("Failed to deserialize a match list");
+                return (page.slug.clone(), matches);
+            }
+
+            parallel_bar.println(format!(
+                "{} {}",
+                &page.slug,
+                console::style("- searching").dim()
+            ));
+
+            let matches: HashSet<HostMatch> = regex
+                .captures_iter(&page.source)
+                .map(|captures| HostMatch {
+                    host: captures[1].to_owned(),
+                    requested_path: captures[2]
+                        .trim_end_matches(")")
+                        .trim_end_matches(");")
+                        .to_owned(),
+                })
+                .collect();
+
+            let mut serialized_matches = Vec::new();
+            ciborium::into_writer(&matches, &mut serialized_matches)
+                .expect("Failed to serialize a match list");
+
+            cache_queue
+                .send(Cacheable {
+                    url: page.url.clone(),
+                    hash,
+                    matches: serialized_matches,
+                })
+                .expect("The caching thread is gone");
+            (page.slug.clone(), matches)
+        })
+        .fold(
+            HashMap::new,
+            |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
+                let hosts = matches.iter().map(|HostMatch { host, .. }| host);
+                for host in hosts {
+                    pages_containing
+                        .entry(host.clone())
+                        .or_default()
+                        .insert(PageAsMatchSet {
+                            slug: slug.clone(),
+                            matches: matches
+                                .iter()
+                                .filter_map(
+                                    |HostMatch {
+                                         requested_path,
+                                         host: matched_host,
+                                     }| match matched_host {
+                                        x if x == host => Some(requested_path),
+                                        _ => None,
+                                    },
+                                )
+                                .cloned()
+                                .collect(),
+                        });
+                }
+                pages_containing
+            },
+        )
+        .reduce(HashMap::new, |mut a, mut b| {
+            // always merge the smaller set into the larger one, in order to rehash fewer elements
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            for (host, pages) in b {
+                a.entry(host).or_default().extend(pages.iter().cloned());
+            }
+            a
+        })
+}
+
+struct Cacheable {
+    url: String,
+    hash: i64, // u64 does not implement rusqlite::types::ToSql
+    matches: Vec<u8>,
+}
+
+fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, matches BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
+
+        let interval = Duration::from_millis(100);
+        let mut next_run = Instant::now();
+
+        loop {
+            let start_time = Instant::now();
+            std::thread::sleep(next_run.saturating_duration_since(start_time));
+
+            if let Ok(transaction) = db.transaction() {
+                for Cacheable { url, hash, matches } in rx.try_iter() {
+                    transaction.execute("INSERT INTO cache(url, hash, matches) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, hash, matches, hash, matches]).expect("Failed to cache a row");
+                }
+                transaction
+                    .commit()
+                    .expect("Failed to commit a cache transaction");
+            }
+
+            next_run = start_time + interval;
+        }
+    });
+    tx
+}
+
+pub fn get_cached_matches(
+    site: &String,
+    cache_db: &PathBuf,
+) -> HashMap<String, HashSet<PageAsMatchSet>> {
+    todo!("get matches from cache db, panic if missing")
+}
