@@ -31,10 +31,7 @@ enum Command {
         /// The Wikidot site handle (e.g. `scp-wiki`)
         site: String,
     },
-    Check {
-        /// The Wikidot site handle (e.g. `scp-wiki`)
-        site: String,
-    },
+    Check,
     Find {
         /// The Wikidot site handle (e.g. `scp-wiki`)
         site: String,
@@ -49,8 +46,8 @@ fn main() {
         Command::Parse { db, site } => {
             from_pages::get_matches(&site, &db, &args.cache_db);
         }
-        Command::Check { site } => {
-            let hosts = from_pages::get_cached_matches(&site, &args.cache_db);
+        Command::Check => {
+            let hosts = from_pages::get_cached_matches(&args.cache_db);
             let client = Client::builder()
                 .redirect(Policy::none())
                 .build()

@@ -197,11 +197,43 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     tx
 }
 
-pub fn get_cached_matches(
-    site: &String,
-    cache_db: &PathBuf,
-) -> HashMap<String, HashSet<PageAsMatchSet>> {
-    todo!("get matches from cache db, panic if missing")
+/// Retrieves matches from whatever is in the cache.
+pub fn get_cached_matches(cache_db: &PathBuf) -> HashMap<String, HashSet<PageAsMatchSet>> {
+    let (_, cache) = prepare_cache(cache_db);
+    cache
+        .iter()
+        .map(|(url, (_, matches))| {
+            let slug = url.rsplit("/").next().expect("Failed to extract a slug");
+            (slug, matches)
+        })
+        .fold(
+            HashMap::new(),
+            |mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>, (slug, matches)| {
+                let hosts = matches.iter().map(|HostMatch { host, .. }| host);
+                for host in hosts {
+                    pages_containing
+                        .entry(host.clone())
+                        .or_default()
+                        .insert(PageAsMatchSet {
+                            slug: slug.to_owned(),
+                            matches: matches
+                                .iter()
+                                .filter_map(
+                                    |HostMatch {
+                                         requested_path,
+                                         host: matched_host,
+                                     }| match matched_host {
+                                        x if x == host => Some(requested_path),
+                                        _ => None,
+                                    },
+                                )
+                                .cloned()
+                                .collect(),
+                        });
+                }
+                pages_containing
+            },
+        )
 }
 
 fn prepare_cache(cache_db: &PathBuf) -> (Connection, HashMap<String, (i64, HashSet<HostMatch>)>) {
