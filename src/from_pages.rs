@@ -25,7 +25,7 @@ struct Page {
     source: String,
 }
 
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 struct HostMatch {
     host: String,
     requested_path: String,
@@ -66,32 +66,7 @@ pub fn get_matches(
 
     let npages = pages.len() as u64;
 
-    let cache_db =
-        Connection::open(cache_db).expect("Failed to open a connection to the cache database");
-    let cache = match cache_db.prepare("SELECT url, hash, matches FROM cache") {
-        Ok(mut stmt) => {
-            let mut map = HashMap::new();
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>("url")?,
-                    (
-                        row.get::<_, i64>("hash")?,
-                        row.get::<_, Vec<u8>>("matches")?,
-                    ),
-                ))
-            })
-            .expect("Failed to query the cache database")
-            .map(|maybe_index| maybe_index.expect("Failed to iterate through a cache row"))
-            .for_each(|(url, data)| {
-                map.insert(url, data);
-            });
-            map
-        }
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg == "no such table: cache" => {
-            HashMap::new()
-        }
-        Err(error) => panic!("Failed to query the cache database: {}", error),
-    };
+    let (cache_db, cache) = prepare_cache(cache_db);
     let cache_queue = spawn_cache_thread(cache_db);
 
     let progress_bar = ProgressBar::new(npages);
@@ -108,7 +83,7 @@ pub fn get_matches(
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, serialized_matches)) = cache.get(&page.url)
+            if let Some((cached_hash, matches)) = cache.get(&page.url)
                 && *cached_hash == hash
             {
                 parallel_bar.println(format!(
@@ -116,10 +91,7 @@ pub fn get_matches(
                     &page.slug,
                     console::style("- cache hit").dim()
                 ));
-                let matches: HashSet<HostMatch> =
-                    ciborium::from_reader(serialized_matches.as_slice())
-                        .expect("Failed to deserialize a match list");
-                return (page.slug.clone(), matches);
+                return (page.slug.clone(), matches.iter().cloned().collect());
             }
 
             parallel_bar.println(format!(
@@ -230,4 +202,41 @@ pub fn get_cached_matches(
     cache_db: &PathBuf,
 ) -> HashMap<String, HashSet<PageAsMatchSet>> {
     todo!("get matches from cache db, panic if missing")
+}
+
+fn prepare_cache(cache_db: &PathBuf) -> (Connection, HashMap<String, (i64, HashSet<HostMatch>)>) {
+    let cache_db =
+        Connection::open(cache_db).expect("Failed to open a connection to the cache database");
+    let cache = match cache_db.prepare("SELECT url, hash, matches FROM cache") {
+        Ok(mut stmt) => {
+            let mut map = HashMap::new();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("url")?,
+                    (
+                        row.get::<_, i64>("hash")?,
+                        row.get::<_, Vec<u8>>("matches")?,
+                    ),
+                ))
+            })
+            .expect("Failed to query the cache database")
+            .map(|maybe_index| maybe_index.expect("Failed to iterate through a cache row"))
+            .for_each(|(url, (hash, serialized_matches))| {
+                map.insert(
+                    url,
+                    (
+                        hash,
+                        ciborium::from_reader(serialized_matches.as_slice())
+                            .expect("Failed to deserialize a match list"),
+                    ),
+                );
+            });
+            map
+        }
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg == "no such table: cache" => {
+            HashMap::new()
+        }
+        Err(error) => panic!("Failed to query the cache database: {}", error),
+    };
+    (cache_db, cache)
 }
