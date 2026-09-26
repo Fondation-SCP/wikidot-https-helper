@@ -119,9 +119,30 @@ fn handle_response(client: &Client, host: &str, response: &Response, bar: &Progr
     if !status.is_success() {
         match u16::from(status) {
             403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
-            301 | 302 | 307 | 308 => match handle_redir(client, todo!("fetch redirection host")) {
-                Ok(response) => handle_response(client, host, &response, bar),
-                Err(error) => bar.println(format!("{}: redirection error ({:#?})", host, error)),
+            301 | 302 | 307 | 308 => match response.headers().get("Location") {
+                Some(location) => match location.to_str() {
+                    Ok(location) => match handle_redir(client, location) {
+                        Ok(response) => handle_response(client, host, &response, bar),
+                        Err(error) => {
+                            bar.println(format!("{}: redirection error ({:#?})", host, error))
+                        }
+                    },
+                    Err(error) => {
+                        bar.println(format!(
+                            "{}: redirection code ({}) with an invalid Location header ({:#?})",
+                            host,
+                            u16::from(status),
+                            error
+                        ));
+                    }
+                },
+                None => {
+                    bar.println(format!(
+                        "{}: redirection code ({}) without a Location header",
+                        host,
+                        u16::from(status)
+                    ));
+                }
             },
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
             other => bar.println(format!("Weird response from {}: code {}", host, other)),
