@@ -7,6 +7,7 @@ use rayon::iter::ParallelIterator;
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::blocking::Response;
 use reqwest::redirect::Policy;
 use rusqlite::OpenFlags;
 use rusqlite::params;
@@ -81,7 +82,7 @@ fn main() {
             .progress_with(progress_bar)
             .for_each(
                 |(host, _)| match client.head(format!("https://{}", host)).send() {
-                    Ok(response) => handle_status(&client, host, response.status(), &parallel_bar),
+                    Ok(response) => handle_response(&client, host, response, &parallel_bar),
                     Err(error) => {
                         if error.is_dns() {
                             parallel_bar.println(format!("{}: DNS error", host));
@@ -113,12 +114,13 @@ fn main() {
     // - no response: broken
 }
 
-fn handle_status(client: &Client, host: &str, status: StatusCode, bar: &ProgressBar) {
+fn handle_response(client: &Client, host: &str, response: &Response, bar: &ProgressBar) {
+    let status = response.status();
     if !status.is_success() {
         match u16::from(status) {
             403 | 405 | 501 => bar.println(format!("{}: need GET with acceptable UA", host)),
             301 | 302 | 307 | 308 => match handle_redir(client, todo!("fetch redirection host")) {
-                Ok(status) => handle_status(client, host, status, bar),
+                Ok(response) => handle_response(client, host, &response, bar),
                 Err(error) => bar.println(format!("{}: redirection error ({:#?})", host, error)),
             },
             other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
@@ -127,7 +129,7 @@ fn handle_status(client: &Client, host: &str, status: StatusCode, bar: &Progress
     }
 }
 
-fn handle_redir(client: &Client, host: &str) -> Result<StatusCode, std::convert::Infallible> {
+fn handle_redir(client: &Client, host: &str) -> Result<Response, std::convert::Infallible> {
     todo!("handle redirection")
 }
 
