@@ -141,6 +141,10 @@ fn main() {
     }
 }
 
+fn print(progress_bar: &ProgressBar, msg: String) {
+    progress_bar.suspend(|| println!("{}", msg));
+}
+
 fn work(hosts: &HashSet<String>, progress_bar: &ProgressBar, client: &Client) {
     hosts.par_iter().for_each(|host| {
         match make_request(client, host) {
@@ -151,7 +155,7 @@ fn work(hosts: &HashSet<String>, progress_bar: &ProgressBar, client: &Client) {
                 &response,
                 progress_bar,
             ),
-            Err(error) => progress_bar.println(error),
+            Err(error) => print(progress_bar, error),
         }
         progress_bar.inc(1);
     });
@@ -247,23 +251,26 @@ fn handle_response(
                 if method == Method::HEAD {
                     match make_get_request(client, &host) {
                         Ok(response) => handle_response(client, host, &Method::GET, &response, bar),
-                        Err(error) => bar.println(error),
+                        Err(error) => print(bar, error),
                     }
                 } else {
-                    bar.println(format!("{}: code {} even on GET", host, u16::from(status)))
+                    print(
+                        bar,
+                        format!("{}: code {} even on GET", host, u16::from(status)),
+                    )
                 }
             }
             301 | 302 | 307 | 308 => {
                 if let Host::Redirected { depth, .. } = host
                     && depth > 10
                 {
-                    bar.println(format!("{}: too many redirections", host))
+                    print(bar, format!("{}: too many redirections", host))
                 } else {
                     match response.headers().get("Location") {
                         Some(location) => match location.to_str() {
                             Ok(location) => {
                                 if location.starts_with("http:") {
-                                    bar.println(format!("{}: redirected to HTTP", host))
+                                    print(bar, format!("{}: redirected to HTTP", host))
                                 } else {
                                     match make_request(client, location) {
                                         Ok(response) => handle_response(
@@ -273,33 +280,39 @@ fn handle_response(
                                             &response,
                                             bar,
                                         ),
-                                        Err(error) => bar.println(error),
+                                        Err(error) => print(bar, error),
                                     }
                                 }
                             }
                             Err(error) => {
-                                bar.println(format!(
-                            "{}: redirection code ({}) with an invalid Location header ({:#?})",
-                            host,
-                            u16::from(status),
-                            error
-                        ));
+                                print(
+                                    bar,
+                                    format!(
+                                        "{}: redirection code ({}) with an invalid Location header ({:#?})",
+                                        host,
+                                        u16::from(status),
+                                        error
+                                    ),
+                                );
                             }
                         },
                         None => {
-                            bar.println(format!(
-                                "{}: redirection code ({}) without a Location header",
-                                host,
-                                u16::from(status)
-                            ));
+                            print(
+                                bar,
+                                format!(
+                                    "{}: redirection code ({}) without a Location header",
+                                    host,
+                                    u16::from(status)
+                                ),
+                            );
                         }
                     }
                 }
             }
             // TODO: on other 4xx: compare with http:// to be sure
             // 429 should be surfaced, not much we can do about it
-            other if status.is_client_error() => bar.println(format!("{}: code {}", host, other)),
-            other => bar.println(format!("Weird response from {}: code {}", host, other)),
+            other if status.is_client_error() => print(bar, format!("{}: code {}", host, other)),
+            other => print(bar, format!("Weird response from {}: code {}", host, other)),
         }
     }
 }
