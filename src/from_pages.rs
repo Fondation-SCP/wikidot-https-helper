@@ -16,6 +16,7 @@ use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -76,7 +77,7 @@ pub fn get_matches(
     let npages = pages.len() as u64;
 
     let (cache_db, cache) = prepare_cache(cache_db);
-    let cache_queue = spawn_cache_thread(cache_db);
+    let (cache_thread, cache_queue) = spawn_cache_thread(cache_db);
 
     let progress_bar = ProgressBar::new(npages).with_style(
         ProgressStyle::with_template("Looking for hostnames in pages {wide_bar} {pos}/{len}")
@@ -87,7 +88,7 @@ pub fn get_matches(
     let regex = Regex::new(r#"http://([^/\s"'<>\[\]@|█*,]+)([^\s"'<>\[\]@|█*,]*)"#)
         .expect("Failed to build the regex");
 
-    pages
+    let parsed_pages = pages
         .par_iter_mut()
         .map(|page| {
             let mut hasher = DefaultHasher::new();
@@ -128,12 +129,12 @@ pub fn get_matches(
                 .expect("Failed to serialize a match list");
 
             cache_queue
-                .send(Cacheable {
+                .send(Some(Cacheable {
                     url: page.url.clone(),
                     page: page.id.clone(),
                     hash,
                     matches: serialized_matches,
-                })
+                }))
                 .expect("The caching thread is gone");
             parallel_bar.inc(1);
             (page.id.slug.clone(), matches)
@@ -159,7 +160,13 @@ pub fn get_matches(
                 a.entry(host).or_default().extend(pages.iter().cloned());
             }
             a
-        })
+        });
+
+    cache_queue
+        .send(None) // signal to the caching thread that we are done
+        .expect("The caching thread is gone");
+    cache_thread.join().unwrap();
+    parsed_pages
 }
 
 #[derive(Debug)]
@@ -205,28 +212,31 @@ struct Cacheable {
     matches: Vec<u8>,
 }
 
-fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
+fn spawn_cache_thread(mut db: Connection) -> (JoinHandle<()>, Sender<Option<Cacheable>>) {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    let cache_thread = std::thread::spawn(move || {
         db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, site TEXT, slug TEXT, hash BLOB NOT NULL, matches BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
         let interval = Duration::from_millis(100);
         let mut next_run = Instant::now();
 
-        loop {
+        'thread_loop: loop {
             let start_time = Instant::now();
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for Cacheable {
-                    url,
-                    page,
-                    hash,
-                    matches,
-                } in rx.try_iter()
-                {
-                    dbg!(&url, &page, &hash, &matches);
-                    transaction.execute("INSERT INTO cache(url, site, slug, hash, matches) VALUES(?, ?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, page.site, page.slug, hash, matches, hash, matches]).expect("Failed to cache a row");
+                for maybe_cacheable in rx.try_iter() {
+                    match maybe_cacheable {
+                        Some(Cacheable {
+                            url,
+                            page,
+                            hash,
+                            matches,
+                        }) => {
+                            transaction.execute("INSERT INTO cache(url, site, slug, hash, matches) VALUES(?, ?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, page.site, page.slug, hash, matches, hash, matches]).expect("Failed to cache a row");
+                        }
+                        None => break 'thread_loop,
+                    }
                 }
                 transaction
                     .commit()
@@ -236,7 +246,7 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
             next_run = start_time + interval;
         }
     });
-    tx
+    (cache_thread, tx)
 }
 
 /// Retrieves matches from whatever is in the cache.
