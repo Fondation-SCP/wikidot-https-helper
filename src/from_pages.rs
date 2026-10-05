@@ -32,10 +32,11 @@ struct Page {
     source: String,
 }
 
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Debug)]
-struct HostMatch {
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Debug, PartialOrd, Ord)]
+pub struct HostMatch {
     host: String,
-    requested_path: String,
+    pub requested_path: String,
+    pub context: String,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -43,8 +44,10 @@ struct HostMatch {
 pub struct PageMatchesOnHost {
     pub page: PageId,
     /// The set of paths requested by the page that this `PageMatchesOnHost` represents on the given host
-    pub matches: BTreeSet<String>,
+    pub matches: BTreeSet<HostMatch>,
 }
+
+static CONTEXT_MARGIN: usize = 10;
 
 pub fn get_matches(
     site: &String,
@@ -115,12 +118,23 @@ pub fn get_matches(
 
             let matches: HashSet<HostMatch> = regex
                 .captures_iter(&page.source)
-                .map(|captures| HostMatch {
-                    host: captures[1].to_owned(),
-                    requested_path: captures[2]
-                        .trim_end_matches(")")
-                        .trim_end_matches(");")
-                        .to_owned(),
+                .map(|captures| {
+                    let regex_match = captures.get(0).unwrap();
+                    let start = page
+                        .source
+                        .floor_char_boundary(regex_match.start().saturating_sub(CONTEXT_MARGIN));
+                    let end = page.source.ceil_char_boundary(
+                        (regex_match.end() + CONTEXT_MARGIN).min(page.source.len()),
+                    );
+
+                    HostMatch {
+                        host: captures[1].to_owned(),
+                        requested_path: captures[2]
+                            .trim_end_matches(")")
+                            .trim_end_matches(");")
+                            .to_owned(),
+                        context: page.source[start..end].to_owned(),
+                    }
                 })
                 .collect();
 
@@ -189,15 +203,12 @@ fn group_by_host(
                 matches: matches
                     .matches
                     .iter()
-                    .filter_map(
-                        |HostMatch {
-                             requested_path,
-                             host: matched_host,
-                         }| match matched_host {
-                            x if x == host => Some(requested_path),
-                            _ => None,
-                        },
-                    )
+                    .filter_map(|host_match| match host_match {
+                        HostMatch {
+                            host: matched_host, ..
+                        } if host == matched_host => Some(host_match),
+                        _ => None,
+                    })
                     .cloned()
                     .collect(),
             });

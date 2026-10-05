@@ -124,7 +124,16 @@ fn main() {
                         matches,
                     } in pages
                     {
-                        println!("{}: {:#?} (from wiki {})", slug, matches, site);
+                        print!("{}: ", console::style(slug).on_blue());
+                        matches.iter().for_each(|host_match| {
+                            print!(
+                                "{}\n  context: {}\n",
+                                host_match.requested_path,
+                                console::style(host_match.context.replace("\n", "\n           "))
+                                    .dim()
+                            );
+                        });
+                        println!("(from wiki {})", console::style(site).blue());
                     }
                 }
             }
