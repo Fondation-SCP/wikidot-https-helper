@@ -19,6 +19,8 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 
+use crate::from_pages::PageId;
+
 mod from_pages;
 
 #[derive(Parser)]
@@ -117,8 +119,12 @@ fn main() {
             match hosts.get(&host) {
                 None => println!("No matches"),
                 Some(pages) => {
-                    for from_pages::PageAsMatchSet { slug, matches } in pages {
-                        println!("{}: {:#?}", slug, matches);
+                    for from_pages::PageMatchesOnHost {
+                        page: PageId { site, slug },
+                        matches,
+                    } in pages
+                    {
+                        println!("{}: {:#?} (from wiki {})", slug, matches, site);
                     }
                 }
             }

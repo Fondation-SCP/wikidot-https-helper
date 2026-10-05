@@ -19,13 +19,19 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use std::time::Instant;
 
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct PageId {
+    pub site: String,
+    pub slug: String,
+}
+
 struct Page {
     url: String,
-    slug: String,
+    id: PageId,
     source: String,
 }
 
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Debug)]
 struct HostMatch {
     host: String,
     requested_path: String,
@@ -33,9 +39,9 @@ struct HostMatch {
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 /// A page, viewed as a set of matches over a given host
-pub struct PageAsMatchSet {
-    pub slug: String,
-    /// The set of paths requested by the page that this `PageAsMatchSet` represents on the given host
+pub struct PageMatchesOnHost {
+    pub page: PageId,
+    /// The set of paths requested by the page that this `PageMatchesOnHost` represents on the given host
     pub matches: BTreeSet<String>,
 }
 
@@ -43,7 +49,7 @@ pub fn get_matches(
     site: &String,
     db: &PathBuf,
     cache_db: &PathBuf,
-) -> HashMap<String, HashSet<PageAsMatchSet>> {
+) -> HashMap<String, HashSet<PageMatchesOnHost>> {
     let db = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("Failed to open a connection to the database");
 
@@ -55,7 +61,10 @@ pub fn get_matches(
         stmt.query_map([pattern], |row| {
             Ok(Page {
                 url: row.get("url")?,
-                slug: row.get("slug")?,
+                id: PageId {
+                    site: site.clone(),
+                    slug: row.get("slug")?,
+                },
                 source: row.get("source")?,
             })
         })
@@ -85,21 +94,21 @@ pub fn get_matches(
             hasher.write(page.source.as_bytes());
             let hash = hasher.finish() as i64;
 
-            if let Some((cached_hash, matches)) = cache.get(&page.url)
+            if let Some((cached_hash, matches)) = cache.get(&page.id)
                 && *cached_hash == hash
             {
                 parallel_bar.println(format!(
                     "{} {}",
-                    &page.slug,
+                    &page.id.slug,
                     console::style("- cache hit").dim()
                 ));
                 parallel_bar.inc(1);
-                return (page.slug.clone(), matches.iter().cloned().collect());
+                return (page.id.slug.clone(), matches.iter().cloned().collect());
             }
 
             parallel_bar.println(format!(
                 "{} {}",
-                &page.slug,
+                &page.id.slug,
                 console::style("- searching").dim()
             ));
 
@@ -121,15 +130,25 @@ pub fn get_matches(
             cache_queue
                 .send(Cacheable {
                     url: page.url.clone(),
+                    page: page.id.clone(),
                     hash,
                     matches: serialized_matches,
                 })
                 .expect("The caching thread is gone");
             parallel_bar.inc(1);
-            (page.slug.clone(), matches)
+            (page.id.slug.clone(), matches)
         })
         .fold(HashMap::new, |pages_containing, (slug, matches)| {
-            group_by_host(pages_containing, (&slug, &matches))
+            group_by_host(
+                pages_containing,
+                PageMatches {
+                    page: PageId {
+                        site: site.to_owned(),
+                        slug,
+                    },
+                    matches,
+                },
+            )
         })
         .reduce(HashMap::new, |mut a, mut b| {
             // always merge the smaller set into the larger one, in order to rehash fewer elements
@@ -143,18 +162,25 @@ pub fn get_matches(
         })
 }
 
+#[derive(Debug)]
+struct PageMatches {
+    page: PageId,
+    matches: HashSet<HostMatch>,
+}
+
 fn group_by_host(
-    mut pages_containing: HashMap<String, HashSet<PageAsMatchSet>>,
-    (slug, matches): (&str, &HashSet<HostMatch>),
-) -> HashMap<String, HashSet<PageAsMatchSet>> {
-    let hosts = matches.iter().map(|HostMatch { host, .. }| host);
+    mut pages_containing: HashMap<String, HashSet<PageMatchesOnHost>>,
+    matches: PageMatches,
+) -> HashMap<String, HashSet<PageMatchesOnHost>> {
+    let hosts = matches.matches.iter().map(|HostMatch { host, .. }| host);
     for host in hosts {
         pages_containing
             .entry(host.clone())
             .or_default()
-            .insert(PageAsMatchSet {
-                slug: slug.to_owned(),
+            .insert(PageMatchesOnHost {
+                page: matches.page.clone(),
                 matches: matches
+                    .matches
                     .iter()
                     .filter_map(
                         |HostMatch {
@@ -174,6 +200,7 @@ fn group_by_host(
 
 struct Cacheable {
     url: String,
+    page: PageId,
     hash: i64, // u64 does not implement rusqlite::types::ToSql
     matches: Vec<u8>,
 }
@@ -181,7 +208,7 @@ struct Cacheable {
 fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, hash BLOB NOT NULL, matches BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
+        db.execute("CREATE TABLE IF NOT EXISTS cache (url TEXT PRIMARY KEY, site TEXT, slug TEXT, hash BLOB NOT NULL, matches BLOB NOT NULL)", []).expect("Failed to ensure that the cache table exists");
 
         let interval = Duration::from_millis(100);
         let mut next_run = Instant::now();
@@ -191,8 +218,15 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
             std::thread::sleep(next_run.saturating_duration_since(start_time));
 
             if let Ok(transaction) = db.transaction() {
-                for Cacheable { url, hash, matches } in rx.try_iter() {
-                    transaction.execute("INSERT INTO cache(url, hash, matches) VALUES(?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, hash, matches, hash, matches]).expect("Failed to cache a row");
+                for Cacheable {
+                    url,
+                    page,
+                    hash,
+                    matches,
+                } in rx.try_iter()
+                {
+                    dbg!(&url, &page, &hash, &matches);
+                    transaction.execute("INSERT INTO cache(url, site, slug, hash, matches) VALUES(?, ?, ?, ?, ?) ON CONFLICT(url) DO UPDATE SET hash=?, matches=?", params![url, page.site, page.slug, hash, matches, hash, matches]).expect("Failed to cache a row");
                 }
                 transaction
                     .commit()
@@ -206,26 +240,26 @@ fn spawn_cache_thread(mut db: Connection) -> Sender<Cacheable> {
 }
 
 /// Retrieves matches from whatever is in the cache.
-pub fn get_cached_matches(cache_db: &PathBuf) -> HashMap<String, HashSet<PageAsMatchSet>> {
+pub fn get_cached_matches(cache_db: &PathBuf) -> HashMap<String, HashSet<PageMatchesOnHost>> {
     let (_, cache) = prepare_cache(cache_db);
     cache
-        .iter()
-        .map(|(url, (_, matches))| {
-            let slug = url.rsplit("/").next().expect("Failed to extract a slug");
-            (slug, matches)
-        })
+        .into_iter()
+        .map(|(page, (_, matches))| PageMatches { page, matches })
         .fold(HashMap::new(), group_by_host)
 }
 
-fn prepare_cache(cache_db: &PathBuf) -> (Connection, HashMap<String, (i64, HashSet<HostMatch>)>) {
+fn prepare_cache(cache_db: &PathBuf) -> (Connection, HashMap<PageId, (i64, HashSet<HostMatch>)>) {
     let cache_db =
         Connection::open(cache_db).expect("Failed to open a connection to the cache database");
-    let cache = match cache_db.prepare("SELECT url, hash, matches FROM cache") {
+    let cache = match cache_db.prepare("SELECT site, slug, hash, matches FROM cache") {
         Ok(mut stmt) => {
             let mut map = HashMap::new();
             stmt.query_map([], |row| {
                 Ok((
-                    row.get::<_, String>("url")?,
+                    PageId {
+                        site: row.get::<_, String>("site")?,
+                        slug: row.get::<_, String>("slug")?,
+                    },
                     (
                         row.get::<_, i64>("hash")?,
                         row.get::<_, Vec<u8>>("matches")?,
